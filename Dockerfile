@@ -1,18 +1,29 @@
-# Use Python base image
+# Use full Python image to ensure all system libraries are present
 FROM python:3.9
 
-# Install Chrome and dependencies
-RUN apt-get update && apt-get install -y wget gnupg2 unzip
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-RUN sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-RUN apt-get update && apt-get install -y google-chrome-stable
+# 1. Install basic tools
+RUN apt-get update && apt-get install -y \
+    wget \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# 2. Install Google Chrome (Direct Download Method)
+# This skips the 'apt-key' error by downloading the .deb file directly
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get update \
+    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
+    && rm google-chrome-stable_current_amd64.deb
+
+# 3. Setup Application
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy App Code
+# Copy the rest of the code
 COPY . .
 
-# Run the App
-CMD ["gunicorn", "-b", "0.0.0.0:10000", "app:app"]
+# 4. Run the app
+# Increased timeout to 120s because Selenium takes time to start
+CMD ["gunicorn", "-b", "0.0.0.0:10000", "app:app", "--timeout", "120"]
