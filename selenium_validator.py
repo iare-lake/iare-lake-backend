@@ -12,6 +12,15 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
+    
+    # OPTIMIZATION 1: Don't wait for full page load (Images/CSS)
+    # 'eager' means: Wait for HTML to parse, but don't wait for images/stylesheets
+    options.page_load_strategy = 'eager' 
+    
+    # OPTIMIZATION 2: Disable Images explicitly to save bandwidth/RAM
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    options.add_experimental_option("prefs", prefs)
+    
     # Docker path
     options.binary_location = "/usr/bin/google-chrome" 
     return webdriver.Chrome(options=options)
@@ -21,20 +30,22 @@ def verify_credentials_browser(roll, password):
     try:
         driver.get("https://samvidha.iare.ac.in/index.php")
         
-        # Smart Wait for Login Form
-        wait = WebDriverWait(driver, 10)
+        # Wait up to 20s for login box
+        wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.NAME, "txt_uname")))
         
         driver.find_element(By.NAME, "txt_uname").send_keys(roll)
         driver.find_element(By.NAME, "txt_pwd").send_keys(password)
         driver.find_element(By.NAME, "but_submit").click()
         
-        # Wait for URL change or Logout button
+        # Check success
         try:
+            # Wait for URL to change to home
             wait.until(EC.url_contains("home"))
             return True
         except:
-            if "Logout" in driver.page_source:
+            # Fallback check
+            if "Logout" in driver.page_source or "Sign out" in driver.page_source:
                 return True
             return False
     except:
@@ -50,68 +61,65 @@ def fetch_attendance_data(roll, password):
         print(f"1. Logging in {roll}...")
         driver.get("https://samvidha.iare.ac.in/index.php")
         
-        wait = WebDriverWait(driver, 15) # 15s max wait
+        # Increased wait to 30s for slow server
+        wait = WebDriverWait(driver, 30) 
         wait.until(EC.presence_of_element_located((By.NAME, "txt_uname")))
         
         driver.find_element(By.NAME, "txt_uname").send_keys(roll)
         driver.find_element(By.NAME, "txt_pwd").send_keys(password)
         driver.find_element(By.NAME, "but_submit").click()
         
-        # Wait for login to complete
+        # Check for success marker or failure
         try:
             wait.until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "Sign out")))
         except:
-            # If we don't see Sign out, check for error
             if "Invalid" in driver.page_source:
                 return {"error": "Invalid Credentials"}
-            # If still on login page
-            if "login.php" in driver.current_url:
-                return {"error": "Login Failed (Stuck on login page)"}
+            # Continue anyway, sometimes 'Sign out' is hidden in menu
 
         print("2. Navigating to Attendance...")
         driver.get("https://samvidha.iare.ac.in/pages/student/student_attendance.php")
         
-        # CRITICAL FIX: Wait specifically for the "ATTENDANCE REPORT" text
-        # This ensures the table is actually loaded before we try to read it
+        # Wait for the specific card body that contains the table
+        # We look for the "Attendance %" header in the table
+        print("   Waiting for table data...")
         try:
-            print("   Waiting for table to load...")
-            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'ATTENDANCE REPORT')]")))
+            # Wait until any table cell with data appears, or the header
+            wait.until(EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Attendance %')]")))
         except:
-            print(f"   Timeout! Current URL: {driver.current_url}")
-            return {"error": "Attendance page timeout (Render too slow)"}
-
-        print("3. Parsing Table...")
+            print("   Timeout waiting for table header.")
+            # Fallback: Just dump HTML and try parsing anyway
+            
+        print("3. Parsing...")
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Find the specific card with "ATTENDANCE REPORT"
-        # based on the HTML you provided
-        report_header = soup.find(lambda tag: tag.name == "h3" and "ATTENDANCE REPORT" in tag.text)
-        
-        if not report_header:
-            return {"error": "Report Header not found in HTML"}
-            
-        # The table is in the parent card's body
-        # We go up to the card, then find the table inside it
-        card_body = report_header.find_parent("div", class_="card").find("div", class_="card-body")
-        target_table = card_body.find("table")
+        # Find the table by looking for the specific header "Attendance %"
+        target_table = None
+        for t in soup.find_all('table'):
+            if "Attendance %" in t.text:
+                target_table = t
+                break
         
         if not target_table:
-            return {"error": "Table tag not found inside Report Card"}
+            # Debugging: Print all table headers found
+            headers = [t.text[:50] for t in soup.find_all('table')]
+            print(f"   Table not found. Headers seen: {headers}")
+            return {"error": "Attendance Table not found (Render Timeout)"}
 
         # Extract Rows
+        # Handle cases where tbody might be missing or present
         rows = target_table.find_all('tr')
-        print(f"   Found {len(rows)} rows.")
-
+        
         for row in rows:
             cols = row.find_all('td')
-            # Columns: [0]=S.No, [1]=Code, [2]=Name, ..., [5]=Conducted, [6]=Attended, [7]=%
+            # Columns based on your source code:
+            # [2]=Course Name, [5]=Total, [6]=Present, [7]=%
             if len(cols) >= 8:
                 subject = cols[2].text.strip()
                 total_str = cols[5].text.strip()
                 present_str = cols[6].text.strip()
                 percent = cols[7].text.strip()
                 
-                # Validation
                 if total_str.isdigit() and present_str.isdigit():
                     data.append({
                         "subject": subject,
@@ -121,7 +129,7 @@ def fetch_attendance_data(roll, password):
                     })
 
         if not data:
-             return {"error": "Table empty (No subjects found)"}
+             return {"error": "Table found but empty data"}
 
         return {"success": True, "data": data}
 
