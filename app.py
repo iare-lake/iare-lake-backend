@@ -85,6 +85,27 @@ def proxy_download():
         print(f"Download Error: {e}")
         return jsonify({"error": "Internal Server Error"}), 500
 
+@app.route('/api/attendance', methods=['POST'])
+def get_attendance():
+    data = request.json
+    roll = data.get('roll')
+    password = data.get('password')
+
+    if not roll or not password:
+        return jsonify({"error": "Missing credentials"}), 400
+
+    print(f"Fetching attendance for: {roll}")
+    
+    # Call Selenium Scraper
+    result = fetch_attendance_data(roll, password)
+
+    if "error" in result:
+        # If credentials were wrong or table not found
+        status = 401 if "Invalid" in result['error'] else 500
+        return jsonify(result), status
+    
+    return jsonify(result)
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
