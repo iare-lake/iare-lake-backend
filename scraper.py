@@ -1,68 +1,120 @@
-# PLAN B: OPTIMIZED SELENIUM (Add 'selenium' and 'webdriver-manager' to requirements.txt)
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+import mechanicalsoup
 from bs4 import BeautifulSoup
-import time
 
-def get_driver():
-    options = Options()
-    # OPTIMIZATIONS FOR RENDER
-    options.add_argument("--headless=new") # Faster headless mode
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,720")
-    
-    # BLOCK IMAGES & CSS (Massive Speed Boost)
-    prefs = {
-        "profile.managed_default_content_settings.images": 2, 
-        "profile.managed_default_content_settings.stylesheets": 2
-    }
-    options.add_experimental_option("prefs", prefs)
-    
-    # Don't wait for the page to fully load (just get the HTML)
-    options.page_load_strategy = 'eager' 
-    
-    return webdriver.Chrome(options=options)
+def get_browser():
+    # Create a browser object that mimics Chrome
+    browser = mechanicalsoup.StatefulBrowser(
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    )
+    return browser
+
+def verify_credentials_fast(roll, password):
+    browser = get_browser()
+    login_url = "https://samvidha.iare.ac.in/index.php"
+
+    try:
+        # 1. Open Login Page
+        print(f"DEBUG: Opening {login_url}")
+        browser.open(login_url)
+
+        # 2. Select the Login Form
+        # We select the form that has the username input
+        browser.select_form('form[action="index.php"]') 
+        
+        # Fallback: If action isn't explicitly index.php, just pick the first form
+        if not browser.get_current_form():
+            browser.select_form()
+
+        # 3. Fill Details
+        # MechanicalSoup automatically keeps existing hidden tokens!
+        browser["txt_uname"] = roll
+        browser["txt_pwd"] = password
+
+        # 4. Submit
+        # This automatically finds the submit button and sends its value
+        response = browser.submit_selected()
+
+        # 5. Check Success
+        # If we are still on the login page (input field exists), it failed
+        if 'name="txt_uname"' in response.text or "Invalid" in response.text:
+            print("DEBUG: Login Failed - Invalid Credentials or Blocked")
+            return False
+            
+        print("DEBUG: Login Successful")
+        return True
+
+    except Exception as e:
+        print(f"DEBUG: Error {e}")
+        return False
 
 def fetch_attendance_fast(roll, password):
-    driver = get_driver()
+    browser = get_browser()
+    login_url = "https://samvidha.iare.ac.in/index.php"
+    
     try:
-        # 1. Login
-        driver.get("https://samvidha.iare.ac.in/index.php")
+        # --- LOGIN FLOW ---
+        browser.open(login_url)
         
-        # Fast input
-        driver.find_element(By.NAME, "txt_uname").send_keys(roll)
-        driver.find_element(By.NAME, "txt_pwd").send_keys(password)
+        # Select form
+        browser.select_form('form[action="index.php"]')
+        if not browser.get_current_form():
+             browser.select_form() # Select first form if explicit select fails
+
+        # Fill data
+        browser["txt_uname"] = roll
+        browser["txt_pwd"] = password
         
-        # Click and wait briefly
-        btn = driver.find_element(By.NAME, "but_submit")
-        btn.click()
+        # Submit
+        response = browser.submit_selected()
+
+        # Validate
+        if 'name="txt_uname"' in response.text:
+            return {"error": "Invalid Credentials (Login Failed)"}
+
+        # --- FETCH ATTENDANCE ---
+        print("DEBUG: Fetching attendance...")
+        attendance_url = "https://samvidha.iare.ac.in/home?action=stud_att_STD"
         
-        # 2. Force Navigate (Don't wait for redirect, just go)
-        # Give it 0.5s for the cookie to set
-        time.sleep(0.5) 
-        driver.get("https://samvidha.iare.ac.in/home?action=stud_att_STD")
+        # MechanicalSoup maintains the session/cookies automatically
+        browser.open(attendance_url)
         
-        # 3. Parse with BS4 (Faster than Selenium)
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # Use BS4 to parse the page content (browser.page is a BS4 object)
+        page = browser.page
         
-        # ... Insert your Parsing Logic Here ...
-        # (Copy the parsing logic from the previous code)
+        # --- PARSING (Same Logic) ---
+        data = []
+        target_table = None
+
+        for t in page.find_all('table'):
+            txt = t.get_text()
+            if "Course Name" in txt or "Attendance %" in txt:
+                target_table = t
+                break
         
-        # For testing:
-        if "Course Name" in driver.page_source:
-             return {"success": True, "data": []} # Add real data parsing here
-        else:
-             return {"error": "Login Failed"}
+        if not target_table:
+            return {"error": "Attendance Table not found"}
+
+        rows = target_table.find_all('tr')
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 8:
+                subject = cols[2].get_text(strip=True)
+                total_str = cols[5].get_text(strip=True)
+                present_str = cols[6].get_text(strip=True)
+                percent = cols[7].get_text(strip=True)
+                
+                if total_str.isdigit() and present_str.isdigit():
+                    data.append({
+                        "subject": subject,
+                        "total": int(total_str),
+                        "present": int(present_str),
+                        "percent": percent
+                    })
+
+        if not data:
+             return {"error": "Table found but empty"}
+
+        return {"success": True, "data": data}
 
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        driver.quit()
-
-def verify_credentials_fast(roll, password):
-    # Reuse the function above or simplify it
-    res = fetch_attendance_fast(roll, password)
-    return "success" in res
