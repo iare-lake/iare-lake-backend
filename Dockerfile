@@ -1,14 +1,14 @@
-# Use a lightweight Python image
+# Use a slim Python image (Uses less RAM)
 FROM python:3.9-slim
 
 WORKDIR /app
 
-# Copy requirements and install
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the code
+# Copy code
 COPY . .
 
-# Run the app (No strict timeout needed anymore)
-CMD ["gunicorn", "-b", "0.0.0.0:10000", "app:app"]
+# Run Gunicorn
+CMD ["gunicorn", "-b", "0.0.0.0:10000", "app:app", "--timeout", "60"]
