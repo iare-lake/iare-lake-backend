@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-# Headers are CRITICAL. They make the server think we are a real Chrome browser.
+# 1. Use a standard Browser Header
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -12,89 +12,86 @@ HEADERS = {
 }
 
 def get_session():
-    """Create a browser session with memory (cookies)"""
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
 
 def login_to_portal(session, roll, password):
-    """
-    Handles the login logic.
-    Returns True if success, False if invalid credentials.
-    """
     login_url = "https://samvidha.iare.ac.in/index.php"
     
     try:
-        # 1. GET the page first to load hidden tokens and cookies
+        # Step 1: Get the Login Page to find the correct button value
+        print(f"DEBUG: Fetching {login_url}...")
         response = session.get(login_url)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 2. Find where the form submits to (Action URL)
-        form = soup.find("form")
-        if not form:
-            return False
-            
-        action = form.get("action")
-        # Handle cases where action is empty or "#"
-        if action and action != "#" and "javascript" not in action:
-            post_url = urljoin(login_url, action)
+        # Step 2: Prepare the Login Data
+        payload = {
+            "txt_uname": roll,
+            "txt_pwd": password
+        }
+
+        # --- CRITICAL FIX: FIND THE EXACT SUBMIT BUTTON VALUE ---
+        submit_btn = soup.find("input", {"name": "but_submit"})
+        if submit_btn:
+            btn_value = submit_btn.get("value")
+            print(f"DEBUG: Found submit button value: '{btn_value}'")
+            payload["but_submit"] = btn_value
         else:
-            post_url = login_url
+            print("DEBUG: Could not find submit button, using default.")
+            payload["but_submit"] = "Get Access!" # Fallback common value
 
-        # 3. Automatically grab all hidden input fields (CSRF tokens, viewstates)
-        payload = {}
-        for inp in soup.find_all("input"):
-            if inp.get("name"):
-                payload[inp["name"]] = inp.get("value", "")
+        # Step 3: Perform Login
+        # We assume the form posts to index.php (common for this site)
+        print("DEBUG: Sending POST request...")
+        post_response = session.post(login_url, data=payload)
 
-        # 4. Fill in user details
-        payload["txt_uname"] = roll
-        payload["txt_pwd"] = password
+        # Step 4: Validate
+        # If we are redirected to 'home', or the URL changes, we are good.
+        # If we see the 'txt_uname' input again, we failed.
         
-        # Ensure the submit button key exists (PHP often requires this)
-        if "but_submit" not in payload:
-            payload["but_submit"] = "Submit"
-
-        # 5. POST the data (The actual login)
-        post_response = session.post(post_url, data=payload)
-
-        # 6. Check if login worked
-        # If we see the username input field again, login failed.
-        if 'name="txt_uname"' in post_response.text or "Invalid" in post_response.text:
+        if 'name="txt_uname"' in post_response.text:
+            print("DEBUG: Login Failed. Still seeing login input.")
+            # OPTIONAL: Print a snippet of the page to see the error message
+            # print(post_response.text[:500]) 
             return False
             
+        print("DEBUG: Login Successful (Page changed).")
         return True
 
     except Exception as e:
-        print(f"Login Exception: {e}")
+        print(f"DEBUG: Login Error: {e}")
         return False
 
 def verify_credentials_fast(roll, password):
-    """Called by /api/verify"""
     session = get_session()
     return login_to_portal(session, roll, password)
 
 def fetch_attendance_fast(roll, password):
-    """Called by /api/attendance"""
     session = get_session()
     
     # 1. Login
     if not login_to_portal(session, roll, password):
-        return {"error": "Invalid Credentials"}
+        return {"error": "Login Failed. Check Roll No/Password."}
 
-    # 2. Fetch Attendance Page
-    # Note: The session cookie from login_to_portal is automatically used here
+    # 2. Fetch Attendance
+    # Note: URL often changes to home?action=stud_att_STD
     attendance_url = "https://samvidha.iare.ac.in/home?action=stud_att_STD"
     
     try:
+        print("DEBUG: Fetching attendance page...")
         response = session.get(attendance_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Check if session expired immediately (rare but possible)
+        if "Session Expired" in response.text or 'name="txt_uname"' in response.text:
+             return {"error": "Session Expired after login."}
 
-        # 3. Parse Table
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 3. Parse Data (Same logic as before)
         data = []
         target_table = None
-
-        # Robust search for the correct table
+        
         for table in soup.find_all('table'):
             txt = table.get_text()
             if "Course Name" in txt or "Attendance %" in txt:
@@ -102,12 +99,13 @@ def fetch_attendance_fast(roll, password):
                 break
         
         if not target_table:
-            return {"error": "Attendance table not found. (Login might have timed out)"}
+            # Debugging: If table not found, what DID we get?
+            print("DEBUG: No table found. Page title:", soup.title.string if soup.title else "No Title")
+            return {"error": "Attendance Table not found."}
 
         rows = target_table.find_all('tr')
         for row in rows:
             cols = row.find_all('td')
-            # Adjust column index based on your table structure
             if len(cols) >= 8:
                 data.append({
                     "subject": cols[2].get_text(strip=True),
@@ -117,9 +115,10 @@ def fetch_attendance_fast(roll, password):
                 })
 
         if not data:
-            return {"error": "Table found but empty"}
-            
+            return {"error": "Attendance table empty."}
+
         return {"success": True, "data": data}
 
     except Exception as e:
+        print(f"DEBUG: Parsing Error: {e}")
         return {"error": str(e)}
