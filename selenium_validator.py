@@ -1,106 +1,115 @@
 import requests
 from bs4 import BeautifulSoup
 
-# Global headers to mimic a real browser so the server doesn't block us
+# Use a real browser User-Agent to avoid being blocked
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin": "https://samvidha.iare.ac.in",
+    "Referer": "https://samvidha.iare.ac.in/index.php"
 }
 
 def get_session():
-    """
-    Creates a session. This is the 'magic' part.
-    It automatically handles cookies (PHPSESSID) just like a web browser.
-    """
     session = requests.Session()
     session.headers.update(HEADERS)
     return session
 
 def verify_credentials_browser(roll, password):
-    """
-    Verifies login using a fast HTTP POST request instead of opening a browser.
-    """
     session = get_session()
-    
-    # These keys (txt_uname, etc.) must match the <input name="..."> in the website's HTML
-    login_payload = {
-        "txt_uname": roll,
-        "txt_pwd": password,
-        "but_submit": "Submit"  # PHP forms often check if the submit button was pressed
-    }
+    login_url = "https://samvidha.iare.ac.in/index.php"
     
     try:
-        # Send the login data to the server
-        response = session.post("https://samvidha.iare.ac.in/index.php", data=login_payload)
+        # STEP 1: GET the login page to find hidden tokens
+        print("1. Fetching login page...")
+        response = session.get(login_url)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # STEP 2: Scrape ALL hidden inputs automatically
+        payload = {}
+        for input_tag in soup.find_all("input"):
+            name = input_tag.get("name")
+            value = input_tag.get("value", "")
+            if name:
+                payload[name] = value
+
+        # STEP 3: Override with actual credentials
+        payload["txt_uname"] = roll
+        payload["txt_pwd"] = password
         
-        # Check if login failed
-        # If the response still contains the login field 'txt_uname', it means we are still on the login page.
-        if 'name="txt_uname"' in response.text or "Invalid" in response.text:
+        # Ensure the submit button key is present (required by PHP)
+        if "but_submit" not in payload:
+            payload["but_submit"] = "" 
+
+        # STEP 4: POST the data back
+        print("2. Sending login request...")
+        post_response = session.post(login_url, data=payload)
+
+        # STEP 5: Validate Login
+        if 'name="txt_uname"' in post_response.text or "Invalid" in post_response.text:
+            print("Login Failed: Check credentials or server response.")
             return False
             
-        # If we got redirected or the page content changed, login was successful
+        print("Login Successful!")
         return True
+
     except Exception as e:
-        print(f"Error in verification: {e}")
+        print(f"Error: {e}")
         return False
 
 def fetch_attendance_data(roll, password):
-    """
-    Logs in and fetches attendance HTML, then parses it with BeautifulSoup.
-    """
     session = get_session()
-    
-    login_payload = {
-        "txt_uname": roll,
-        "txt_pwd": password,
-        "but_submit": "Submit"
-    }
+    login_url = "https://samvidha.iare.ac.in/index.php"
     
     try:
-        # 1. LOGIN
-        print(f"Logging in user: {roll}")
-        login_response = session.post("https://samvidha.iare.ac.in/index.php", data=login_payload)
+        # --- LOGIN FLOW (Same as above) ---
+        response = session.get(login_url)
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Verify login success before proceeding
-        if 'name="txt_uname"' in login_response.text or "Invalid" in login_response.text:
-            return {"error": "Invalid Credentials or Login Failed"}
+        payload = {}
+        for input_tag in soup.find_all("input"):
+            name = input_tag.get("name")
+            value = input_tag.get("value", "")
+            if name:
+                payload[name] = value
 
-        # 2. GET ATTENDANCE PAGE
-        # The session holds the cookies, so we are authorized to see this page now.
-        print("Fetching attendance page...")
+        payload["txt_uname"] = roll
+        payload["txt_pwd"] = password
+        if "but_submit" not in payload: payload["but_submit"] = ""
+
+        login_response = session.post(login_url, data=payload)
+
+        if 'name="txt_uname"' in login_response.text or "Invalid" in login_response.text:
+            return {"error": "Invalid Credentials"}
+
+        # --- FETCH DATA ---
+        print("3. Fetching attendance...")
+        # Note: The URL usually changes to 'home' after login. 
+        # Make sure this specific URL is correct for your college portal.
         attendance_url = "https://samvidha.iare.ac.in/home?action=stud_att_STD"
-        attendance_response = session.get(attendance_url)
         
-        # 3. PARSE DATA (BeautifulSoup)
-        # This part replaces your Selenium logic of finding elements
-        soup = BeautifulSoup(attendance_response.text, 'html.parser')
+        data_response = session.get(attendance_url)
+        soup = BeautifulSoup(data_response.text, 'html.parser')
         
+        # --- PARSING LOGIC ---
         data = []
         target_table = None
         
-        # Logic to find the correct table (same logic you had before, adapted for BS4)
-        for table in soup.find_all('table'):
-            text_content = table.get_text()
-            if "Course Name" in text_content or "Attendance %" in text_content:
-                target_table = table
+        for t in soup.find_all('table'):
+            if "Course Name" in t.text or "Attendance %" in t.text:
+                target_table = t
                 break
         
         if not target_table:
-            return {"error": "Attendance Table not found"}
+            return {"error": "Attendance Table not found (Login might be successful, but page layout changed)"}
 
-        # Extract rows
         rows = target_table.find_all('tr')
-        
-        # Skip header, start processing
         for row in rows:
             cols = row.find_all('td')
-            # Check if row has enough columns (Your logic checked for 8)
             if len(cols) >= 8:
                 subject = cols[2].get_text(strip=True)
                 total_str = cols[5].get_text(strip=True)
                 present_str = cols[6].get_text(strip=True)
                 percent = cols[7].get_text(strip=True)
                 
-                # Basic validation
                 if total_str.isdigit() and present_str.isdigit():
                     data.append({
                         "subject": subject,
@@ -110,10 +119,9 @@ def fetch_attendance_data(roll, password):
                     })
 
         if not data:
-             return {"error": "Table found but no data rows extracted"}
+             return {"error": "Table found but empty"}
 
         return {"success": True, "data": data}
 
     except Exception as e:
-        print(f"Scraping Error: {e}")
         return {"error": str(e)}
